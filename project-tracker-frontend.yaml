@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  This template creates a basic CI/CD pipeline using a GitHub repository as the source,
+  and a CodeBuild project to build the code. It is designed to be used as a replacement for
+  a pipeline that previously used AWS CodeCommit.
+
+# Parameters are inputs that allow you to customize the template.
+Parameters:
+  GitHubConnectionArn:
+    Type: String
+    Description: The ARN of the AWS CodePipeline connection to your GitHub account.
+    # Note: You must create this connection in the AWS CodePipeline console first.
+    # Go to CodePipeline -> Settings -> Connections to create a new one.
+  GitHubOwner:
+    Type: String
+    Description: The GitHub account or organization that owns the repository (e.g., 'my-github-org').
+  GitHubRepo:
+    Type: String
+    Description: The name of the GitHub repository (e.g., 'my-app-repo').
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: The branch to monitor for changes (e.g., 'main' or 'develop').
+  S3BucketName:
+    Type: String
+    Description: The name for the S3 bucket used by the pipeline to store artifacts.
+  WebsiteBucketName:
+    Type: String
+    Description: The name for the S3 bucket that will host the static website.
+
+# Resources are the AWS services that will be created by the template.
+Resources:
+  # IAM Role for the CodePipeline service to use.
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt BuildProject.Arn
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'codestar-connections:UseConnection'
+                Resource: !Ref GitHubConnectionArn
+              # Add permissions for the deployment S3 bucket
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${WebsiteBucketName}'
+                  - !Sub 'arn:aws:s3:::${WebsiteBucketName}/*'
+
+  # S3 bucket to store pipeline artifacts.
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+
+  # S3 bucket to host the static website.
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref WebsiteBucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+    # Required to make the bucket public and a website host
+    DeletionPolicy: Retain
+
+  # Policy to make the WebsiteBucket publicly readable
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${WebsiteBucketName}/*"
+
+
+  # CodeBuild project to build the code.
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${AWS::StackName}-build-project'
+      Description: Builds the application from the GitHub repository.
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Source:
+        Type: CODEPIPELINE
+        # This is the buildspec.yml file. It is embedded directly in the template.
+        # You can also reference a file named buildspec.yml in your repository.
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo "Installing dependencies..."
+                - npm install
+            build:
+              commands:
+                - echo "Building the application..."
+                - npm run build
+          artifacts:
+            files:
+              - '**/*'
+            base-directory: 'dist' # Or your build output folder.
+
+  # IAM Role for the CodeBuild service.
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                # This has been updated to fix the circular dependency.
+                # It now uses a wildcard instead of referencing the BuildProject.
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${S3BucketName}'
+                  - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                Resource: '*'
+
+  # The main CodePipeline resource.
+  MyPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${AWS::StackName}-pipeline'
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              RunOrder: 1
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Sub '${GitHubOwner}/${GitHubRepo}'
+                BranchName: !Ref GitHubBranch
+                # Note: The 'OutputArtifactFormat' field is required for CodeStarSourceConnection provider
+                # and must be 'CODE_ZIP'. This is different from the old GitHub provider.
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceOutput
+              # This is an important part for automatic pipeline triggers.
+              # We use a webhook by default with CodeStarSourceConnection.
+
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName: !Ref BuildProject
+
+        - Name: Deploy
+          Actions:
+            - Name: S3Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              RunOrder: 1
+              InputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                BucketName: !Ref WebsiteBucket
+                Extract: true # This will unzip the artifact and deploy the contents to the bucket.
