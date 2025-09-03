@@ -147,7 +147,7 @@ Resources:
           artifacts:
             files:
               - '**/*'
-            base-directory: 'dist' # Or your build output folder.
+            base-directory: 'build' # Or your build output folder.
 
   # IAM Role for the CodeBuild service.
   CodeBuildServiceRole:
